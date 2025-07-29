@@ -1,0 +1,952 @@
+#%%
+import os
+import numpy as np
+import pandas as pd
+import time
+from math import radians, degrees, sin, cos, asin, acos, sqrt, atan2
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.colors as mcolors
+from mpl_toolkits.axes_grid1 import make_axes_locatable 
+import plotly.figure_factory as ff
+import matplotlib.collections as mcoll
+from matplotlib.dates import DateFormatter
+import matplotlib.dates as mdates
+from geopy.distance import geodesic
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path
+import matplotlib.ticker as ticker
+import tcmarkers
+
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
+import scipy.ndimage as ndimage
+from scipy.stats import gaussian_kde
+from scipy.interpolate import interpn
+from scipy.ndimage import binary_dilation, minimum_filter, maximum_filter, label
+from skimage.measure import regionprops
+from sklearn.decomposition import PCA
+from scipy import integrate
+
+from datetime import datetime, timedelta
+
+from haversine import haversine
+
+import tropycal.tracks as tracks
+
+from numba import jit
+
+import itertools    
+
+from ty_pkg import truncate_colormap, colorline, setup_map, weather_map_contour, contourf_and_save, ep_t, concentric_circles, interpolate_data
+from ty_pkg import latlon_extent, storm_info, haversine_distance, Met, calculate_bearing_position, tc_finder
+
+
+
+pangu_dir = r'/home1/jek/Pangu-Weather'
+
+
+
+pres_list = ['1000','925','850','700','600','500','400','300','250','200','150','100','50']
+pres=500                                                #살펴볼 기압면 결정
+p=pres_list.index(str(pres))
+pres_array = np.array(pres_list, dtype=np.float32)
+
+surface_factor = ['MSLP', 'U10', 'V10', 'T2M']
+surface_dict = {'MSLP':0, 'U10':1, 'V10':2, 'T2M':3}
+upper_factor = ['z', 'q', 't', 'u', 'v']
+upper_dict = {'z':0, 'q':1, 't':2, 'u':3, 'v':4}
+
+proj = ccrs.PlateCarree()
+norm_p = mcolors.Normalize(vmin=950, vmax=1020)
+
+
+# %%
+#위경도 지정
+lat_indices, lat_start, lat_end, lon_indices, lon_start, lon_end, extent, latlon_ratio = latlon_extent(100,160,5,45)  
+lon_grid, lat_grid = np.meshgrid(lon_indices[lon_start:lon_end + 1], lat_indices[lat_start:lat_end + 1])
+
+
+ssv_dict = {}
+
+
+#태풍 지정
+storm_name = 'hinnamnor'                                                                               
+storm_name = storm_name.upper()
+storm_year = 2022
+
+surface_factors = []  # 예시: 지표면에서는 'MSLP'만 선택
+upper_factors = ['z'] 
+perturation_scale = 0.05
+
+#예측 시간 지정, 초기 시간 지정, 앙상블 수
+predict_interval_list = np.arange(0,24*7+1,6)  
+ens_num = 100
+
+
+
+for first_str in ['2022/08/27/00UTC']:
+    first_time = datetime.strptime(first_str, "%Y/%m/%d/%HUTC")
+    ssv_key = first_time
+    surface_factors.sort()
+    upper_factors.sort()
+    surface_str = "".join([f"_{factor}" for factor in surface_factors])  # 각 요소 앞에 _ 추가
+    upper_str = "".join([f"_{factor}" for factor in upper_factors])  # 각 요소 앞에 _ 추가
+
+
+    datetime_list = np.array([first_time + timedelta(hours=int(hours)) for hours in predict_interval_list])
+    # datetime_array = np.array([(first_time + timedelta(hours=int(hours))) for hours in predict_interval_list])
+    
+    storm_lon, storm_lat, storm_mslp, storm_time = storm_info(pangu_dir, storm_name, storm_year, datetime_list = datetime_list, wind_thres=0)   #태풍 영문명, 년도 입력
+    min_position = {}  # 태풍 중심 정보 dictionary
+
+
+    # for ens in range(ens_num):
+    for ens in range(ens_num):
+        print(f'{ens}번째 앙상블 예측')
+        min_position[ens] = {}
+        output_data_dir = rf'{pangu_dir}/output_data/{first_str}/{perturation_scale}ENS{surface_str}{upper_str}/{ens}'
+        
+        
+        for predict_interval in predict_interval_list:
+            predict_time = first_time + timedelta(hours=int(predict_interval))
+            predict_str = predict_time.strftime("%Y/%m/%d/%HUTC")
+            met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+            mslp = met.met_data('MSLP')
+            wind_speed = met.wind_speed()
+            z_diff = met.met_data('z', level = 300) - met.met_data('z', level = 500)
+            
+
+            min_position[ens] = tc_finder(mslp, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lon_grid, 
+                                    wind_speed, predict_time, z_diff, storm_lon, storm_lat, storm_mslp, storm_time, 
+                                    min_position[ens], mask_size = 2.5, init_size=5, local_min_size = 5, mslp_z_dis = 1000)
+
+
+        for predict_interval in predict_interval_list[::-1]:
+            predict_time = first_time + timedelta(hours=int(predict_interval))
+            predict_str = predict_time.strftime("%Y/%m/%d/%HUTC")
+            met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+            mslp = met.met_data('MSLP')
+            wind_speed = met.wind_speed()
+            z_diff = met.met_data('z', level = 300) - met.met_data('z', level = 500)
+            
+            min_position[ens] = tc_finder(mslp, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lon_grid, 
+                                        wind_speed, predict_time, z_diff, storm_lon, storm_lat, storm_mslp, storm_time, 
+                                        min_position[ens], mask_size = 2.5, local_min_size = 5, back_prop='y', mslp_z_dis = 1000)
+            
+            min_position[ens] = {k: min_position[ens][k] for k in sorted(min_position[ens])}
+            
+    ssv_dict[ssv_key] = min_position
+
+
+
+#%%   
+for first_str ,min_position in ssv_dict.items():
+    fig, ax = plt.subplots(1, 1, figsize=(10*latlon_ratio, 10), subplot_kw={'projection': proj})
+    ax.set_title(f'{first_str} (+{predict_interval_list[-1]}h)', fontsize=20, loc = 'left')
+    ax.set_title(f'ENS{surface_str}{upper_str}{perturation_scale} Track\n{storm_name}', fontsize=20, loc = 'right')
+    ax.set_extent(extent, crs=proj)
+    setup_map(ax)
+
+    ax.plot(storm_lon, storm_lat, color='black', linestyle='-', marker='', label = 'best track', transform=ax.projection, zorder=3)
+    model_pred_sc = ax.scatter(storm_lon, storm_lat, c=storm_mslp, cmap='jet_r', marker='^',norm=norm_p, transform=ax.projection, zorder=3)
+    plt.colorbar(model_pred_sc, ax=ax, orientation='vertical', label='MSLP (hPa)', shrink=0.8)
+
+
+
+    for i in range(len(storm_time)):
+        new_time = storm_time[i].strftime("%Y/%m/%d/%HUTC")
+        if new_time.endswith('00UTC'):
+            dx, dy = 3, -3  # 시간 나타낼 위치 조정
+            new_lon, new_lat = storm_lon[i] + dx, storm_lat[i] + dy
+            
+            # annotate를 사용하여 텍스트와 함께 선(화살표)을 그림
+            ax.text(storm_lon[i], storm_lat[i], new_time[8:-6]
+                    , horizontalalignment='center', verticalalignment='bottom', fontsize=10)
+
+
+    # for ens in [77]:
+    for ens in range(ens_num):
+    # for ens in range(34,35):
+    # for ens in group2:
+
+        lons = [pos['lon'] for _,pos in min_position[ens].items()]
+        lats = [pos['lat'] for _,pos in min_position[ens].items()]
+        min_values = [pos['mslp'] for _,pos in min_position[ens].items()]
+        pred_times = [pos for pos,_ in min_position[ens].items()]
+        # print(ens)
+        lc = colorline(ax, lons, lats, z=min_values, cmap=plt.get_cmap('jet_r'), norm=mcolors.Normalize(vmin=950, vmax=1020), linewidth=2, alpha=1)
+
+        for i in range(len(pred_times)):
+            if pred_times[i].hour == 0:
+                ax.text(lons[i],lats[i], str(pred_times[i].day)
+                    , horizontalalignment='center', verticalalignment='bottom', fontsize=10, zorder = 6)
+
+        if ens == 0:
+            ax.text(lons[-1],lats[-1], '0 ENS'
+                    , horizontalalignment='center', verticalalignment='bottom', fontsize=10)
+
+        
+    ax.legend(loc='upper right')
+
+
+    lons_all = np.concatenate([np.array([pos['lon'] for _, pos in min_position[ens].items()]) for ens in range(ens_num)])
+    lats_all = np.concatenate([np.array([pos['lat'] for _, pos in min_position[ens].items()]) for ens in range(ens_num)])
+
+
+    xy = np.vstack([lons_all, lats_all])
+    kde = gaussian_kde(xy)
+    positions = np.vstack([lon_grid.ravel(), lat_grid.ravel()])
+    f = np.reshape(kde(positions).T, lon_grid.shape)
+
+
+    levels = np.linspace(0, 0.015, 100)
+    cf = ax.contourf(lon_grid, lat_grid, f, levels=levels, transform=proj, cmap='jet', extend = 'both')
+    plt.show()
+
+    
+    #%%
+ssv_dict[datetime(2022,8,27,0)][0][datetime(2022, 8, 31, 0, 0)]['lon']
+
+
+#%% 없는 ens 번호들 찾기
+
+missing_ens = []
+
+# 모든 앙상블 멤버에 대해 반복
+for ens in range(ens_num):
+    # 날짜 객체 생성
+    date_key = datetime(2022, 8, 30, 12, 0)
+
+    # 특정 날짜의 데이터가 있는지 확인
+    if date_key not in ssv_dict['27.00'][ens]:
+        missing_ens.append(ens)  # 없으면 리스트에 추가
+
+# 출력
+if missing_ens:
+    print(f"Missing date data for ensemble members: {missing_ens}")
+else:
+    print("All ensemble members have data for the specified date.")
+
+#%%
+
+
+
+# 데이터 준비
+key1 = datetime(2022,8,27,0)
+key2 = datetime(2022,8,27,0)
+datetime1 = datetime(2022, 8, 28, 0, 0)
+datetime2 = datetime(2022, 8, 30, 12, 0)
+
+data1 = [(ssv_dict[key1][ens][datetime1]['lon'], ssv_dict[key1][ens][datetime1]['lat']) for ens in range(ens_num)]
+data2 = [(ssv_dict[key2][ens][datetime2]['lon'], ssv_dict[key2][ens][datetime2]['lat']) for ens in range(ens_num)]
+
+# NumPy 배열로 변환
+data1 = np.array(data1)
+data2 = np.array(data2)
+
+# PCA 객체 생성 및 주성분 분석 수행
+pca1 = PCA(n_components=1)
+pca2 = PCA(n_components=1)
+pca1.fit(data1)
+pca2.fit(data2)
+
+# 데이터를 주축에 투영
+projection1 = pca1.transform(data1)[:, 0]  # 주축에 투영된 데이터 (1차원)
+projection2 = pca2.transform(data2)[:, 0]  # 주축에 투영된 데이터 (1차원)
+
+# 상관관계 계산
+correlation = np.corrcoef(projection1, projection2)[0, 1]
+print(f"상관관계: {correlation}")
+
+fig, axs = plt.subplots(1, 1, figsize=(10, 5), subplot_kw={'projection': ccrs.PlateCarree()})
+
+# 첫 번째 데이터 세트 시각화
+axs.scatter(data1[:, 0], data1[:, 1], alpha=0.2, label='Data Set 1')
+axs.quiver(pca1.mean_[0], pca1.mean_[1], pca1.components_[0, 0], pca1.components_[0, 1], scale=10, color='r', width=0.003, label='Principal Axis 1')
+axs.set_title('Data Set 1 PCA Projection')
+axs.set_xlabel('Longitude')
+axs.set_ylabel('Latitude')
+
+
+# 두 번째 데이터 세트 시각화
+axs.scatter(data2[:, 0], data2[:, 1], alpha=0.2, label='Data Set 2')
+axs.quiver(pca2.mean_[0], pca2.mean_[1], pca2.components_[0, 0], pca2.components_[0, 1], scale=10, color='b', width=0.003, label='Principal Axis 2')
+axs.legend()
+axs.gridlines()
+setup_map(axs, back_color='n')
+axs.set_extent([120, 160, 20, 35])
+plt.tight_layout()
+plt.show()
+
+
+#%%
+# Define the colors you want in your colormap
+colors = ["purple", "darkblue", "lightblue", "white", "yellow", "red", "pink"]
+
+# Create a colormap from the colors
+pwp = LinearSegmentedColormap.from_list("custom_cmap", colors, N=256)
+# 예제 데이터 (ssv_dict와 ens_num, z_500 데이터가 이미 정의되어 있다고 가정)
+key1 = datetime(2022,8,27,0)
+datetime1 = datetime(2022, 8, 30, 0)
+data = [(ssv_dict[key1][ens][datetime1]['lon'], ssv_dict[key1][ens][datetime1]['lat']) for ens in range(ens_num)]
+
+# choosen_factor= 'v'
+altitude = 500
+predict_interval = 24
+
+# NumPy 배열로 변환
+data = np.array(data)
+
+
+
+for choosen_factor in ['steering_wind']:
+    
+    # PCA 객체 생성 및 주성분 분석 수행
+    pca = PCA(n_components=1)
+    pca.fit(data)
+
+    # 데이터를 주축에 투영
+    projection = pca.transform(data)[:, 0]  # 주축에 투영된 데이터 (1차원)
+    principal_component = pca.components_[0]
+
+    # 투영된 데이터의 ensemble mean 계산
+    ensemble_mean = np.mean(projection)
+
+    # 각 앙상블 멤버의 투영 데이터와 ensemble mean 사이의 거리 계산
+    distances = projection - ensemble_mean
+
+    # 각 앙상블 멤버의 거리를 저장
+    ensemble_distances = {ens: distance for ens, distance in enumerate(distances)}
+
+
+    ens_factor=[]
+    for ens in range(ens_num):
+        output_data_dir = rf'{pangu_dir}/output_data/{first_str}/{perturation_scale}ENS{surface_str}{upper_str}/{ens}'
+        met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+        if choosen_factor != 'steering_wind':
+            ens_factor.append(met.met_data(choosen_factor, level = altitude))
+        else:
+            u_list = []
+            v_list = []
+            steer_pres = [850,700,600,500,400,300,250]
+            for steer_altitude in steer_pres:
+                u_list.append(met.met_data('u', level = steer_altitude))
+                v_list.append(met.met_data('v', level = steer_altitude))
+            
+            u,v = 0, 0
+            for i in range(len(steer_pres)-1):
+                u += (u_list[i]+u_list[i+1])/2*(steer_pres[i+1]-steer_pres[i])
+                v += (v_list[i]+v_list[i+1])/2*(steer_pres[i+1]-steer_pres[i])
+            
+            u/=np.ptp(steer_pres)
+            v/=np.ptp(steer_pres)
+            # if ens == 0:
+            #     u0 = met.met_data('u', level = altitude)
+            #     v0 = met.met_data('v', level = altitude)
+            ens_factor.append(u * principal_component[0] + v * principal_component[1])
+            
+            if ens == 0:
+                u0 = u
+                v0 = v
+
+    # z_500 데이터를 numpy 배열로 변환
+    ens_factor = np.array(ens_factor)
+    
+    ens_factor_std = np.std(ens_factor, axis=0)
+    ens_factor = (ens_factor - np.mean(ens_factor, axis=0)) / ens_factor_std
+
+    # 공분산 및 분산 계산
+    cov_matrix = np.zeros_like(ens_factor[0])
+    var_matrix = np.zeros_like(ens_factor[0])
+
+    for i in range(ens_factor.shape[1]):  # lat 방향
+        for j in range(ens_factor.shape[2]):  # lon 방향
+            cov_matrix[i, j] = np.cov(distances, ens_factor[:, i, j])[0, 1]
+            var_matrix[i, j] = np.var(ens_factor[:,i,j])
+
+
+    # 공분산/분산 비율 계산
+    cov_var_ratio = cov_matrix / var_matrix
+
+    # NaN 또는 Inf 값을 0으로 대체
+    cov_var_ratio = np.nan_to_num(cov_var_ratio)
+
+
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8), subplot_kw={'projection': ccrs.PlateCarree()})
+    contour = ax.contourf(lon_grid, lat_grid, cov_var_ratio, cmap=pwp, levels=np.linspace(-2, 2, 20), transform=ccrs.PlateCarree())
+    cbar = plt.colorbar(contour, ax=ax, label=f'Cov(distance, {choosen_factor}_{altitude}) / {choosen_factor}_{altitude}', shrink = 0.5)
+    cbar.locator = ticker.MultipleLocator(0.5)  # Set the colorbar ticks to have an interval of 0.5
+    cbar.update_ticks()
+    setup_map(ax, back_color='n')
+    plt.title(f'{key1}UTC+({predict_interval}h) {choosen_factor}_{altitude}')
+    if choosen_factor == 'steering_wind':
+        ax.barbs(lon_grid[::8,::8], lat_grid[::8,::8], u0[::8,::8], v0[::8,::8], length=5, linewidth=0.5)
+        plt.title(f'{key1}UTC+({predict_interval}h) {choosen_factor} 850hPa-250hPa')
+    
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.show()
+
+#%%
+
+# 데이터 준비
+key1 = '27.00'
+key2 = '27.00'
+start_date = datetime(2022, 8, 27, 18, 0)
+end_date = datetime(2022, 8, 29, 0, 0)
+key_date = datetime(2022, 8 ,int(key1[:2]), int(key1[3:]),0)
+
+# 날짜 범위 생성 (6시간 간격)
+date_range = [start_date + timedelta(hours=6*i) for i in range(int((end_date - start_date).total_seconds() / 21600) + 1)]
+
+# 상관관계를 저장할 리스트
+correlations = []
+hour_list = []
+
+# 날짜 범위에 따라 상관관계 계산
+for date1 in date_range:
+    print(date1, key_date)
+    data1 = [(ssv_dict[key1][ens][date1]['lon'], ssv_dict[key1][ens][date1]['lat']) for ens in range(ens_num)]
+    data1 = np.array(data1)
+
+    data2 = [(ssv_dict[key2][ens][end_date]['lon'], ssv_dict[key2][ens][end_date]['lat']) for ens in range(ens_num)]
+    data2 = np.array(data2)
+
+    # PCA 객체 생성 및 주성분 분석 수행
+    pca1 = PCA(n_components=1)
+    pca2 = PCA(n_components=1)
+    pca1.fit(data1)
+    pca2.fit(data2)
+
+    # 데이터를 주축에 투영
+    projection1 = pca1.transform(data1)[:, 0]
+    projection2 = pca2.transform(data2)[:, 0]
+
+    # 상관관계 계산
+    correlation = np.abs(np.corrcoef(projection1, projection2)[0, 1])
+    correlations.append(correlation)
+    hour_list.append((date1 - key_date).total_seconds() / 3600)  # 시간을 시간 단위로 변환
+
+
+# 그래프 그리기
+plt.figure(figsize=(7, 5))
+plt.plot(hour_list, correlations, marker='o')  # 시간 리스트를 x축 데이터로 사용
+plt.ylabel("Correlation")
+plt.xlabel("Forecast Hour (h)")
+plt.xticks(hour_list, [f"{int(h)}h" for h in hour_list])  # x축에 표시할 레이블
+plt.grid(True)
+plt.xlim(min(hour_list), max(hour_list))  # x 축 범위 설정
+plt.ylim(0, 1)  # y 축 범위 설정 (상관계수는 0과 1 사이 값)
+plt.title(f"Correlation over Forecast Hours\n {key_date.strftime('%Y/%m/%d/%HUTC')} - {end_date.strftime('%Y/%m/%d/%HUTC')}")
+plt.show()
+
+#%%
+print(hour_list)
+#%%
+# 데이터를 주축에 투영
+projection = pca.transform(data)
+projected_data = pca.inverse_transform(projection)  # 투영된 데이터를 원본 공간으로 복원
+
+# 시각화
+plt.figure(figsize=(8, 6))
+plt.scatter(data[:, 0], data[:, 1], alpha=0.5, label='Original Data')
+plt.scatter(projected_data[:, 0], projected_data[:, 1], alpha=0.8, label='Projected Data')
+
+# 주성분(축) 그리기
+mean = pca.mean_
+first_pc = pca.components_[0]
+plt.quiver(*mean, *first_pc, scale=3, color='r', width=0.012, label='Principal Axis')
+
+# 각 데이터 포인트에서 주축까지의 선 그리기
+for i in range(data.shape[0]):
+    plt.plot([data[i, 0], projected_data[i, 0]], [data[i, 1], projected_data[i, 1]], 'k-', lw=0.5)
+
+plt.title('PCA on 2D Latitude-Longitude Data')
+plt.xlabel('Latitude')
+plt.ylabel('Longitude')
+plt.legend()
+plt.axis('equal')
+plt.show()
+
+#%%
+#그룹 찾기, 그룹 별 세력 표시
+lat_values = []
+
+for ens in range(100):
+    for key, pos in min_position[ens].items():
+        if key.strftime("%Y/%m/%d/%HUTC") == '2022/09/01/00UTC':
+            lat_values.append([ens, pos['lat']])  # (ens index, lat)
+
+
+
+# 위도(lat) 값이 가장 높은 ens와 가장 낮은 ens를 찾음
+lat_values.sort(key=lambda x: x[1])
+# lat_values2.sort(key=lambda x: x[1])
+group1 = [item[0] for item in lat_values[:10]]
+group2 = [item[0] for item in lat_values[-10:]]
+
+
+
+for ens in range(ens_num):
+    min_values = [pos['mslp'] for _,pos in min_position[ens].items()]
+    x = list(min_position[ens].keys())
+    plt.plot(x, min_values, color = 'black')
+    
+# group1의 첫 번째 원소에만 레이블을 추가합니다.
+first = True
+for ens in group1:
+    min_values = [pos['mslp'] for _,pos in min_position[ens].items()]
+    x = list(min_position[ens].keys())
+    if first:
+        plt.plot(x, min_values, color='red', label='group1')
+        first = False
+    else:
+        plt.plot(x, min_values, color='red')
+
+# group2의 첫 번째 원소에만 레이블을 추가합니다.
+first = True
+for ens in group2:
+    min_values = [pos['mslp'] for _,pos in min_position[ens].items()]
+    x = list(min_position[ens].keys())
+    
+    if first:
+        plt.plot(x, min_values, color='blue', label='group2')
+
+        first = False
+    else:
+        plt.plot(x, min_values, color='blue')
+
+plt.plot(storm_time, storm_mslp, color = 'green', label = 'Best track')
+# Set the locator for the x-axis to locate days
+plt.gca().xaxis.set_major_locator(mdates.DayLocator())
+
+# Set the formatter for the x-axis to display dates in 'mm.dd' format
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m.%d'))
+
+# Optionally, rotate the date labels for better readability
+# plt.gcf().autofmt_xdate()
+plt.ylabel('pressure(hPa)')
+plt.xlabel('Time')
+plt.legend(loc='lower left')
+
+#%%
+#group별 고도 별 평균 그리기
+
+levels_dict = {
+            't':{
+                200: np.arange(220,231,1),
+                500: np.arange(250,281,1),
+                850: np.arange(280,301,1),
+                925: np.arange(280,301,1)
+            }
+
+            ,
+               
+            'z':{200: np.arange(11760,12720,120),
+               500: np.arange(5580,6000,60),
+               850: np.arange(1380,1680,30),
+               925: np.arange(600,840,30)    
+               }}
+
+levels_diff = {'t': np.arange(-2,2.1,0.1),
+                'z': np.arange(-100,101,10)}
+
+data_type_list = ['t','z']
+wind_scale = 1000
+
+path = f'/Data/home/jjoo0727/Pangu-Weather/plot/ENS/group_level_diff/{perturation_scale}ENS{surface_str}{upper_str}'
+for data_type in levels_dict:
+    for alt in levels_dict[data_type]:
+        for predict_interval in np.arange(0,169,6):
+            # print(data_t)
+            levels = levels_dict[data_type][alt]
+            group1_values = []
+            group2_values = []
+            predict_time = first_time + timedelta(hours=int(predict_interval))
+            predict_str = predict_time.strftime("%Y/%m/%d/%HUTC")
+            
+            fig, ax = plt.subplots(1, 3, figsize=(10*latlon_ratio*3, 10), subplot_kw={'projection': proj})
+            fig.suptitle(f'{predict_str} {alt}hPa height(m) & wind', fontsize=45)
+        
+            # Group 1
+            for ens in group1:
+                output_data_dir = rf'{pangu_dir}/output_data/{first_str}/{perturation_scale}ENS{surface_str}{upper_str}/{ens}'
+                met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+                z = met.met_data(data_type, level = alt)
+                u = met.met_data('u', level = alt)
+                v = met.met_data('v', level = alt)
+                # ax.contour(lon_grid, lat_grid, z, colors='red', levels = levels, alpha=0.1)
+                group1_values.append(np.array([z,u,v]))
+                # print(ens)
+
+            # Group 2
+            for ens in group2:
+                output_data_dir = rf'{pangu_dir}/output_data/{first_str}/{perturation_scale}ENS{surface_str}{upper_str}/{ens}'
+                met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+                z = met.met_data(data_type, level = alt)
+                u = met.met_data('u', level = alt)
+                v = met.met_data('v', level = alt)
+                # ax.contour(lon_grid, lat_grid, z, colors='blue', levels = levels, alpha=0.1)
+                group2_values.append(np.array([z,u,v]))
+            
+            group1_mean = np.mean(np.stack(group1_values), axis=0)
+            group2_mean = np.mean(np.stack(group2_values), axis=0)
+
+
+            for idx, axi in enumerate(ax.ravel()):
+                axi.set_extent(extent, crs=proj)
+                setup_map(axi, back_color='n')
+                
+                # 첫 번째 축에는 group1의 데이터를 그림
+                if idx == 0:
+                    axi.set_title('group1', fontsize=30)
+                    g = axi.contourf(lon_grid, lat_grid, group1_mean[0], levels=levels, cmap = 'gist_ncar', extend = 'both')
+                    Q = axi.quiver(lon_grid[::4,::4], lat_grid[::4,::4], group1_mean[1][::4,::4], group1_mean[2][::4,::4], scale=wind_scale)
+                    axi.quiverkey(Q, X=0.93, Y=1.05, U=10, label='10 m/s', labelpos='E')
+                    fig.colorbar(g, ax = axi, shrink=0.8)
+                    
+                # # 두 번째 축에는 group2의 데이터를 그림
+                elif idx == 1:
+                    axi.set_title('group2', fontsize=30)
+                    g = axi.contourf(lon_grid, lat_grid, group2_mean[0], levels=levels, cmap = 'gist_ncar', extend = 'both')
+                    Q = axi.quiver(lon_grid[::4,::4], lat_grid[::4,::4], group2_mean[1][::4,::4], group2_mean[2][::4,::4], scale=wind_scale)
+                    axi.quiverkey(Q, X=0.93, Y=1.05, U=10, label='10 m/s', labelpos='E')
+                    fig.colorbar(g, ax = axi, shrink=0.8)
+                    
+                elif idx == 2:
+                    axi.set_title('group1-group2', fontsize=30)
+                    g = axi.contourf(lon_grid, lat_grid, group1_mean[0]-group2_mean[0], levels=levels_diff[data_type], cmap = 'seismic', extend = 'both')
+                    Q = axi.quiver(lon_grid[::4,::4], lat_grid[::4,::4], group1_mean[1][::4,::4] - group2_mean[1][::4,::4], group1_mean[2][::4,::4]-group2_mean[2][::4,::4], scale=wind_scale/5)
+                    axi.quiverkey(Q, X=0.93, Y=1.05, U=10, label='10 m/s', labelpos='E')
+                    fig.colorbar(g, ax = axi, shrink=0.8)
+                    
+
+            plt.subplots_adjust(wspace=0.05)        
+            # 폴더 경로 생성
+            folder_path = path+f'/{data_type}_{alt}hPa'
+
+            # 해당 경로에 폴더가 없으면 생성
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
+            else:
+                pass
+            
+            plt.savefig(f'{folder_path}/{predict_interval}')
+            # plt.show()
+            plt.close()
+
+
+
+
+#%%
+#group별 위도, 경도 평균 그리기
+zonal_data = {}
+merid_data = {}
+
+lon_space = 7.5
+lat_space = 2
+lon_space, lat_space = int(lon_space*4), int(lat_space*4)
+
+variable_keys = list(upper_dict.keys())
+variable_keys.append('ept')
+
+for pred_time in datetime_list[6:21]:
+    print(pred_time)
+    zonal_data[pred_time]={}
+    merid_data[pred_time]={}
+    
+    for g_num, group in enumerate([group1, group2]):
+        zonal_data[pred_time][g_num]={}
+        merid_data[pred_time][g_num]={}
+        
+        for key in variable_keys:
+            zonal_data[pred_time][g_num][key]=[]
+            merid_data[pred_time][g_num][key]=[]
+            
+            for ens_num, ens in enumerate(group):
+                # print(ens)
+                c_lat = min_position[ens][pred_time]['idx'][0]
+                c_lon = min_position[ens][pred_time]['idx'][1]
+                
+                predict_interval = pred_time - first_time   
+                predict_interval = int(predict_interval.total_seconds() / 3600)
+                
+                output_data_dir = rf'{pangu_dir}/output_data/{first_str}/{perturation_scale}ENS{surface_str}{upper_str}/{ens}'
+                met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+                
+                if key != 'ept':
+                    variable = met.met_data(key, level = 'all')
+                
+                elif key == 'ept':
+                    t = met.met_data('t', level = 'all')
+                    q = met.met_data('q', level = 'all')
+                    variable = ep_t(t, pres_array[:,np.newaxis,np.newaxis], q)
+            
+                zonal_data[pred_time][g_num][key].append(variable[:, c_lat - lat_space: c_lat + lat_space+1, c_lon - lon_space: c_lon + lon_space+1])
+                merid_data[pred_time][g_num][key].append(variable[:, c_lat - lat_space: c_lat + lat_space+1, c_lon - lon_space: c_lon + lon_space+1])
+                
+            zonal_data[pred_time][g_num][key] = np.mean(np.array(zonal_data[pred_time][g_num][key]), axis=(0,2))
+            merid_data[pred_time][g_num][key] = np.mean(np.array(merid_data[pred_time][g_num][key]), axis=(0,3))[:,::-1]
+
+
+
+#%%
+variable_dict = {
+    't'  : {'title': 'Temperature anomaly', 'level': np.arange(-10,10,1), 'diff_level': np.arange(-10,10.5,1), 
+            'cmap': 'seismic', 'bar_label': 'K'}, 
+    'q'  : {'title': 'Specific Humidity', 'level': np.arange(0,20,0.5), 'diff_level': np.arange(-10,10.5,1), 
+            'cmap': 'gist_ncar', 'bar_label': 'g/kg'}, 
+    'ept': {'title': 'Equivalent Potential Temperature', 'level': np.arange(335,366,1), 'diff_level': np.arange(-20,20.5,1), 
+            'cmap': 'gist_ncar', 'bar_label': 'K'},
+    'z':   {'title': 'Geopotential Height anomaly', 'level': np.arange(-100,101,5), 'diff_level': np.arange(-200,200.1,10), 
+            'cmap': 'seismic', 'bar_label': 'm'},
+    'u'  : {'title': 'Zonal Wind(U)', 'level': np.arange(-50,51,1), 'diff_level': np.arange(-50,51,1),
+            'cmap': 'seismic', 'bar_label': 'm/s'}, 
+    'v'  : {'title': 'Meriodonal Wind(V)', 'level': np.arange(-50,51,1), 'diff_level': np.arange(-50,50.1,1),
+            'cmap': 'seismic', 'bar_label': 'm/s'} 
+    }
+
+x = np.arange(-lon_space/4,lon_space/4+0.1, 0.25)
+y = pres_array
+
+xx, yy = np.meshgrid(x, y)
+path = f'/Data/home/jjoo0727/Pangu-Weather/plot/ENS/group_zonal/{perturation_scale}ENS{surface_str}{upper_str}'
+for pred_time in datetime_list[6:21]:
+    pred_str = pred_time.strftime("%Y.%m.%d.%HUTC")
+
+    for plot_num in range(2):    
+        fig, axs = plt.subplots(3,3,figsize = (15,12))
+        fig.suptitle(pred_str, y=0.95, fontsize = 25)
+        
+        key_list = list(variable_dict.keys())[plot_num*3:plot_num*3+3]
+        # print(key_list)
+        for i, g_num in enumerate(zonal_data[pred_time]):
+            for j, key in enumerate(key_list):
+                ax = axs[j,i]
+                if key == 't' or key == 'z':
+                    cax = ax.contourf(xx, yy, zonal_data[pred_time][g_num][key]-np.mean(zonal_data[pred_time][g_num][key], axis = 1)[:,np.newaxis], cmap = variable_dict[key]['cmap'], levels = variable_dict[key]['level'], extend = 'both')
+                else:
+                    cax = ax.contourf(xx, yy, zonal_data[pred_time][g_num][key], cmap = variable_dict[key]['cmap'], levels = variable_dict[key]['level'], extend = 'both')
+                ax.set_xlabel('Longitude(°)')
+                ax.set_ylabel('Pressure(hPa)')
+                ax.invert_yaxis()
+                cbar= plt.colorbar(cax, ax = ax, shrink = 1)
+                cbar.set_label(variable_dict[key]['bar_label'], fontsize=15)
+                ax.set_title(f'group {g_num+1}', fontsize = 14)
+                ax.axhline(200, color='black', linestyle='--')
+                
+                if i==1:
+                    ax.set_title(f'{variable_dict[key]["title"]}\ngroup {g_num+1}', fontsize = 14)
+                
+        for j, key in enumerate(key_list):
+            ax = axs[j,2]
+            cax = ax.contourf(xx, yy, zonal_data[pred_time][0][key] - zonal_data[pred_time][1][key], cmap = 'seismic', levels = variable_dict[key]['diff_level'], extend = 'both')
+            ax.set_xlabel('Longitude(°)')
+            ax.set_ylabel('Pressure(hPa)')
+            ax.set_title(f'group1 - group2', fontsize = 14)
+            ax.invert_yaxis()
+            ax.axhline(200, color='black', linestyle='--')
+            
+            cbar= plt.colorbar(cax, ax = ax, shrink = 1)
+            cbar.set_label(variable_dict[key]['bar_label'], fontsize=15)
+            
+        plt.subplots_adjust(wspace = 0.3, hspace = 0.4)
+        
+        if not os.path.exists(f'{path}/{key_list}'):
+            os.makedirs(f'{path}/{key_list}')
+        else:
+            pass  
+        plt.savefig(f'{path}/{key_list}/{pred_str}.png')
+        plt.close()
+
+
+#%%
+#태풍 연직 단면 보는 코드
+#
+#Radial interpolation 진행
+#변수별로 연산진행하는 것보다 하나의 배열로 합쳐서 하는 것이 3-4배 정도 빠름(numba 특성)
+#for문 없앨때마다 연산이 기하급수적으로 빨라짐
+
+pres_array = np.array(pres_list, dtype=np.float32)
+rad_data = {}
+distances = np.arange(0, 501, 5)
+bearing = np.linspace(0, 358, 180)
+rad_factor = upper_factor+['ept']
+
+
+for g_num, group in enumerate([group1, group2]):
+    rad_data[g_num]={}
+    
+    for ens_num, ens in enumerate(group):
+        rad_data[g_num][ens_num]={}
+        
+        
+        start = time.time()
+        for mp_time, mp in min_position[ens].items():
+            
+            predict_interval = mp_time - first_time   
+            predict_interval = int(predict_interval.total_seconds() / 3600)
+            output_data_dir = rf'{pangu_dir}/output_data/{first_str}/{perturation_scale}ENS{surface_str}{upper_str}/{ens}'
+            met = Met(output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid)
+            rad_data[g_num][ens_num][predict_interval]={}
+            
+            #일정 거리, 360도 각 방위에 떨어진 지점의 lat, lon을 lat_c, lon_c에 지정
+            lat_c, lon_c = concentric_circles(mp['lat'], mp['lon'], distances, bearing)
+
+            data = []
+            
+            #rad_factor에 지정한 변수 데이터를 하나의 data 배열에 저장
+            for key in rad_factor:
+                    
+                if key in upper_factor:
+                    data.append(met.met_data(key, level = 'all'))
+                    
+                elif key == 'ept':
+                    t = met.met_data('t', level = 'all')
+                    q = met.met_data('q', level = 'all')
+                    data.append(ep_t(t, pres_array[:,np.newaxis,np.newaxis], q))
+                    
+                
+            data = np.array(data)
+            data_ip = interpolate_data(data, lat_indices, lon_indices, lat_c, lon_c)
+            for i, key in enumerate(rad_factor): 
+                rad_data[g_num][ens_num][predict_interval][key] = data_ip[i]
+
+            
+        end = time.time()
+        print(f"group{g_num+1}, ens: {ens_num}, size: {len(min_position[ens])}, {end-start:.2f}s")
+
+
+rad_mean = {}
+
+for key in rad_factor:
+    rad_mean[key] = {}
+
+    for gp in range(2):
+        rad_mean[key][gp] = {}
+
+        for pi in np.arange(30,24*7+1,6):
+            rad_mean[key][gp][pi] = []
+
+            for ens in range(10):
+                if pi in rad_data[gp][ens]:  # 키가 rad_data[0]에 존재하는지 확인
+                    rad_mean[key][gp][pi].append(rad_data[gp][ens][pi][key])
+
+            if rad_mean[key][gp][pi]==[]:
+                del rad_mean[key][gp][pi]  # 비어있다면 해당 키 삭제
+            
+            else:
+                rad_mean[key][gp][pi] = np.mean(rad_mean[key][gp][pi], axis=0)  
+
+
+#%%
+
+xx, yy = np.meshgrid(distances, pres_array)
+path = f'/Data/home/jjoo0727/Pangu-Weather/plot/ENS/group_all_level_radial/{perturation_scale}ENS{surface_str}{upper_str}'
+variable_dict = {
+    'V_t': {'title': 'Tangential Wind', 'level': np.arange(-50,51,1), 'diff_level': np.arange(-30,31,1), 
+            'cmap': 'seismic', 'bar_label': 'm/s'},  
+    'V_r': {'title': 'Radial Wind', 'level': np.arange(-15,16,1), 'diff_level': np.arange(-5,6,1),
+            'cmap': 'seismic', 'bar_label': 'm/s'}, 
+    't'  : {'title': 'Temperature anomaly', 'level': np.arange(-5,5.5,0.5), 'diff_level': np.arange(-10,10.5,0.5), 
+            'cmap': 'seismic', 'bar_label': 'K'}, 
+    'ept': {'title': 'Equivalent Potential Temperature', 'level': np.arange(335,361,1), 'diff_level': np.arange(-10,10.5,0.5), 
+            'cmap': 'gist_ncar', 'bar_label': 'K'},
+    'u'  : {'title': 'Zonal Wind(U)', 'level': np.arange(-20,21,1), 'diff_level': np.arange(-10,11,0.5),
+            'cmap': 'seismic', 'bar_label': 'm/s'}, 
+    'v'  : {'title': 'Meriodonal Wind(V)', 'level': np.arange(-20,21,1), 'diff_level': np.arange(-10,10.1,0.5),
+            'cmap': 'seismic', 'bar_label': 'm/s'}, 
+    'z':   {'title': 'Geopotential Height anomaly', 'level': np.arange(-50,51,5), 'diff_level': np.arange(-50,50.1,5), 
+            'cmap': 'seismic', 'bar_label': 'm'}
+    }
+
+
+for pi in rad_mean['t'][1]:
+    
+    if pi <= 120:
+        group_dict = {}
+        
+        for gp in range(2):
+            u = rad_mean['u'][gp][pi]
+            v = rad_mean['v'][gp][pi]
+            t = rad_mean['t'][gp][pi]
+            q = rad_mean['q'][gp][pi]
+            z = rad_mean['z'][gp][pi]
+            ept = rad_mean['ept'][gp][pi]
+            
+            V_t = np.empty_like(u) 
+            V_r = np.empty_like(v) 
+
+            bearing_rad = np.radians(bearing)
+            
+            # 각 위치에 대한 접선 및 방사 성분 계산
+            for i in range(len(bearing_rad)):
+                V_r[:, :, i] =  u[:, :, i] * np.sin(bearing_rad[i]) + v[:, :, i] * np.cos(bearing_rad[i])
+                V_t[:, :, i] = -u[:, :, i] * np.cos(bearing_rad[i]) + v[:, :, i] * np.sin(bearing_rad[i])
+            
+            group_dict[gp] = {'V_t': V_t, 'V_r': V_r, 't'  : t, 'ept': ept, 'u':u ,'v': v, 'z': z}
+
+        for plot_num in range(3):
+            fig, axs = plt.subplots(2,3,figsize=(25,15))
+            predict_str = (first_time + timedelta(hours=int(pi))).strftime("%Y.%m.%d.%HUTC")
+            fig.suptitle(f'{predict_str}(+{pi}h)', fontsize=35, y=0.97)
+
+            key_list = list(variable_dict.keys())[plot_num*2:plot_num*2+2]
+            
+            for i, key in enumerate(key_list):   
+                
+                ax = axs[i,0]
+                ax.set_title('group1', fontsize=25)
+                if key == 't' or key == 'z':
+                    cax =ax.contourf(xx, yy, np.mean(group_dict[0][key], axis=2) - np.mean(group_dict[0][key], axis=(1,2))[:,np.newaxis], cmap = variable_dict[key]['cmap'], levels = variable_dict[key]['level'], extend = 'both')
+                else:
+                    cax =ax.contourf(xx, yy, np.mean(group_dict[0][key], axis=2), cmap = variable_dict[key]['cmap'], levels = variable_dict[key]['level'], extend = 'both')
+                    
+                cbar = plt.colorbar(cax, ax = ax, orientation='vertical', ticks = variable_dict[key]['level'][::10])
+                cbar.set_label(variable_dict[key]['bar_label'], fontsize=15)
+
+
+                ax = axs[i,1]
+                ax.set_title(f"{variable_dict[key]['title']}\n group2", fontsize=25)
+                if key == 't' or key == 'z':
+                    cax =ax.contourf(xx, yy, np.mean(group_dict[1][key], axis=2) - np.mean(group_dict[1][key], axis=(1,2))[:,np.newaxis], cmap = variable_dict[key]['cmap'], levels = variable_dict[key]['level'], extend = 'both')
+                else:
+                    cax =ax.contourf(xx, yy, np.mean(group_dict[1][key], axis=2), cmap = variable_dict[key]['cmap'], levels = variable_dict[key]['level'], extend = 'both')
+                cbar = plt.colorbar(cax, ax = ax, orientation='vertical', ticks = variable_dict[key]['level'][::10])
+                cbar.set_label(variable_dict[key]['bar_label'], fontsize=15)
+                    
+                    
+                ax = axs[i,2]
+                ax.set_title('group1 - group2', fontsize=25)
+                cax =ax.contourf(xx, yy, np.mean(group_dict[0][key] - group_dict[1][key], axis=2), cmap = 'seismic', levels = variable_dict[key]['diff_level'], extend = 'both')
+                cbar = plt.colorbar(cax, ax = ax, orientation='vertical', ticks = variable_dict[key]['diff_level'][::10])
+                cbar.set_label(variable_dict[key]['bar_label'], fontsize=15)
+                
+                
+                for j in range(3):
+                    ax = axs[i,j]
+                    ax.set_xlabel("distance(km)", fontsize = 18)
+                    ax.set_ylabel('Pressure(hPa)', fontsize = 18)
+                    ax.axhline(200, color='black', linestyle='--')
+                    ax.invert_yaxis()
+                    
+                plt.subplots_adjust(hspace=0.4) 
+            
+            file_path = path+f'/{key_list}'
+            if not os.path.exists(file_path):
+                os.makedirs(file_path)
+            else:
+                pass  
+             
+            plt.savefig(f'{file_path}/{predict_str}.png')
+            plt.close()
+        
+        
+    
+    
+
