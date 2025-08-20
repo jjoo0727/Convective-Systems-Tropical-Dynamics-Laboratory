@@ -1,47 +1,15 @@
 import os
 import numpy as np
 import pandas as pd
-import time
 from math import radians, degrees, sin, cos, asin, acos, sqrt, atan2
-import matplotlib
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.colors import LinearSegmentedColormap
-import matplotlib.colors as mcolors
-from mpl_toolkits.axes_grid1 import make_axes_locatable 
-import plotly.figure_factory as ff
-import matplotlib.collections as mcoll
-from matplotlib.dates import DateFormatter
-import matplotlib.dates as mdates
-from geopy.distance import geodesic
-from matplotlib.patches import PathPatch
-from matplotlib.path import Path
-import matplotlib.ticker as ticker
-import matplotlib.ticker as mticker
-import tcmarkers
 
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-
-from sklearn.decomposition import PCA
-from skimage.measure import regionprops
-
-import scipy.ndimage as ndimage
-from scipy.stats import gaussian_kde
-from scipy.interpolate import interpn
 from scipy.ndimage import binary_dilation, minimum_filter, maximum_filter, label
-from scipy import integrate
-from scipy.ndimage import gaussian_filter1d
 
 from datetime import datetime, timedelta
-
-from haversine import haversine
 
 import tropycal.tracks as tracks
 
 from numba import jit, njit
-
-import itertools    
 
 from typing import List, Optional, Union, Tuple, Dict
 
@@ -52,17 +20,6 @@ pangu_dir = r'/Data/home/jjoo0727/Pangu-Weather'
 
 
 pres_list = ['1000','925','850','700','600','500','400','300','250','200','150','100','50']
-pres=500                                                #살펴볼 기압면 결정
-p=pres_list.index(str(pres))
-pres_array = np.array(pres_list, dtype=np.float32)
-
-surface_factor = ['MSLP', 'U10', 'V10', 'T2M']
-surface_dict = {'MSLP':0, 'U10':1, 'V10':2, 'T2M':3}
-upper_factor = ['z', 'q', 't', 'u', 'v']
-upper_dict = {'z':0, 'q':1, 't':2, 'u':3, 'v':4}
-
-proj = ccrs.PlateCarree()
-norm_p = mcolors.Normalize(vmin=950, vmax=1020)
 
 #위경도 범위 지정 함수
 def latlon_extent(lon_min, lon_max, lat_min, lat_max, part = 'y'):    
@@ -108,22 +65,6 @@ def storm_info(pangu_dir, storm_name, storm_year, datetime_list=None, wind_thres
     
     return storm_lon, storm_lat, storm_mslp, storm_time
 
-# @jit(nopython=True)
-# def haversine_distance(lat1, lon1, lat2, lon2):
-#     """
-#     Calculate the great circle distance in kilometers between two points 
-#     on the earth (specified in decimal degrees)
-#     """
-#     # convert decimal degrees to radians 
-#     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-
-#     # haversine formula 
-#     dlon = lon2 - lon1 
-#     dlat = lat2 - lat1 
-#     a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
-#     c = 2 * np.arcsin(np.sqrt(a)) 
-#     r = 6371 # Radius of earth in kilometers. Use 3956 for miles
-#     return c * r
 
 @jit(nopython=True)
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -148,7 +89,8 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 #output 기상 정보 클래스
 class Met:
-    def __init__(self, output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid, input_sign = 'n'):
+    def __init__(self, output_data_dir, predict_interval, surface_dict, upper_dict, lat_start, lat_end, lon_start, lon_end, lat_grid, lon_grid, input_sign = 'n',
+                 pres_list = ['1000','925','850','700','600','500','400','300','250','200','150','100','50']):
         if input_sign =='n':
             self.surface = np.load(os.path.join(output_data_dir, rf'surface/{predict_interval}h.npy')).astype(np.float32)
             self.upper = np.load(os.path.join(output_data_dir, rf'upper/{predict_interval}h.npy')).astype(np.float32)
@@ -164,6 +106,7 @@ class Met:
         self.lon_start = lon_start
         self.lon_end = lon_end
         self.lon_grid = lon_grid
+        self.pres_list = pres_list
     
     @staticmethod
     def data_unit(data, name):
@@ -189,7 +132,7 @@ class Met:
             return Met.data_unit(result, data)
         
         else:
-            pres   = pres_list.index(level)
+            pres   = selfpres_list.index(level)
             result = self.upper[self.upper_dict[data], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1].copy()
             return Met.data_unit(result, data)
         
@@ -205,143 +148,11 @@ class Met:
             v = self.upper[self.upper_dict['v'], :, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
        
         else:
-            pres = pres_list.index(level)
+            pres = self.pres_list.index(level)
             u = self.upper[self.upper_dict['u'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
             v = self.upper[self.upper_dict['v'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
         
         return np.sqrt(u**2 + v**2)
-    
-    # def vorticity(self, level='sf'):
-    #     level = str(level)
-        
-    #     earth_radius = 6371e3  # in meters
-    #     deg_to_rad = np.pi / 180
-
-    #     # Pre-calculate deltas for longitude and latitude
-    #     delta_lon = 0.25 * deg_to_rad * earth_radius * np.cos(self.lat_grid * deg_to_rad)
-    #     delta_lat = 0.25 * deg_to_rad * earth_radius * np.ones_like(self.lat_grid)
-        
-    #     if level == 'all':
-    #         u = self.upper[self.upper_dict['u'], :, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #         v = self.upper[self.upper_dict['v'], :, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #         vort = np.full_like(u, np.nan)
-            
-    #         for i in range(13):
-    #             dv_dx = np.empty_like(v[i])
-    #             dv_dx[:, 1:-1] = (v[i, :, 2:] - v[i, :, :-2]) / (2 * delta_lon[:, 1:-1])
-    #             dv_dx[:, 0] = dv_dx[:, -1] = np.nan
-
-    #             du_dy = np.empty_like(u[i])
-    #             du_dy[1:-1, :] = (u[i, :-2, :] - u[i, 2:, :]) / (2 * delta_lat[1:-1, :])
-    #             du_dy[0, :] = du_dy[-1, :] = np.nan
-
-    #             # Calculate vorticity avoiding boundaries
-    #             vort[i,1:-1, 1:-1] = dv_dx[1:-1, 1:-1] - du_dy[1:-1, 1:-1]
-
-    #         return vort
-        
-    #     else:
-    #         if level == 'sf':
-    #             u = self.surface[self.surface_dict['U10'], self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #             v = self.surface[self.surface_dict['V10'], self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-            
-    #         else:
-    #             pres = pres_list.index(level)
-    #             u = self.upper[self.upper_dict['u'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #             v = self.upper[self.upper_dict['v'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-            
-    #         vort = np.full_like(u, np.nan)
-            
-    #         dv_dx = np.empty_like(v)
-    #         dv_dx[:, 1:-1] = (v[:, 2:] - v[:, :-2]) / (2 * delta_lon[:, 1:-1])
-    #         dv_dx[:, 0] = dv_dx[:, -1] = np.nan
-
-    #         du_dy = np.empty_like(u)
-    #         du_dy[1:-1, :] = (u[:-2, :] - u[2:, :]) / (2 * delta_lat[1:-1, :])
-    #         du_dy[0, :] = du_dy[-1, :] = np.nan
-
-    #         # Calculate vorticity avoiding boundaries
-    #         vort[1:-1, 1:-1] = dv_dx[1:-1, 1:-1] - du_dy[1:-1, 1:-1]
-            
-    #         return vort
-        
-    
-    # def divergence(self, level='sf'):
-    #     level = str(level)
-
-    #     earth_radius = 6371e3  # meters
-    #     deg_to_rad = np.pi / 180
-
-    #     # Pre-calculate deltas for longitude and latitude
-    #     delta_lon = 0.25 * deg_to_rad * earth_radius * np.cos(self.lat_grid * deg_to_rad)
-    #     delta_lat = 0.25 * deg_to_rad * earth_radius * np.ones_like(self.lat_grid)
-
-    #     if level == 'all':
-    #         u = self.upper[self.upper_dict['u'], :, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #         v = self.upper[self.upper_dict['v'], :, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #         div = np.full_like(u, np.nan)
-
-    #         for i in range(13):  # Assuming there are 13 vertical levels
-    #             du_dx = np.empty_like(u[i])
-    #             du_dx[:, 1:-1] = (u[i, :, 2:] - u[i, :, :-2]) / (2 * delta_lon[:, 1:-1])
-    #             du_dx[:, 0] = du_dx[:, -1] = np.nan
-
-    #             dv_dy = np.empty_like(v[i])
-    #             dv_dy[1:-1, :] = (v[i, :-2, :] - v[i, 2:, :]) / (2 * delta_lat[1:-1, :])
-    #             dv_dy[0, :] = dv_dy[-1, :] = np.nan
-
-    #             # Calculate divergence avoiding boundaries
-    #             div[i, 1:-1, 1:-1] = du_dx[1:-1, 1:-1] + dv_dy[1:-1, 1:-1]
-
-    #         return div
-
-    #     else:
-    #         if level == 'sf':
-    #             u = self.surface[self.surface_dict['U10'], self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #             v = self.surface[self.surface_dict['V10'], self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-
-    #         else:
-    #             pres = pres_list.index(level)  # assuming pres_list is defined with pressure levels
-    #             u = self.upper[self.upper_dict['u'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-    #             v = self.upper[self.upper_dict['v'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
-
-    #         div = np.full_like(u, np.nan)
-
-    #         du_dx = np.empty_like(u)
-    #         du_dx[:, 1:-1] = (u[:, 2:] - u[:, :-2]) / (2 * delta_lon[:, 1:-1])
-    #         du_dx[:, 0] = du_dx[:, -1] = np.nan
-
-    #         dv_dy = np.empty_like(v)
-    #         dv_dy[1:-1, :] = (v[:-2, :] - v[2:, :]) / (2 * delta_lat[1:-1, :])
-    #         dv_dy[0, :] = dv_dy[-1, :] = np.nan
-
-    #         # Calculate divergence avoiding boundaries
-    #         div[1:-1, 1:-1] = du_dx[1:-1, 1:-1] + dv_dy[1:-1, 1:-1]
-
-    #         return div
-        
-    def calculate_derivative(self, data, axis, sigma=1.0):
-        # Apply Gaussian filter for smoothing before derivative
-        # smoothed = gaussian_filter1d(data, sigma=sigma, axis=axis, mode='nearest')
-        smoothed = data
-        derivative = np.gradient(smoothed, axis=axis)
-        return derivative
-    
-    # def calculate_derivative(self, data, axis, sigma=1.0):
-    #     # Apply Gaussian filter for smoothing before derivative
-    #     smoothed = data
-
-    #     # 4th order central difference implementation
-    #     derivative = np.zeros_like(smoothed)
-    #     if axis == 0:
-    #         # Vertical (latitude)
-    #         h = 1  # Assuming 1 as index spacing; modify as necessary for actual data spacing
-    #         derivative[2:-2] = (-smoothed[0:-4] + 8 * smoothed[1:-3] - 8 * smoothed[3:-1] + smoothed[4:]) / (12 * h)
-    #     else:
-    #         # Horizontal (longitude)
-    #         h = 1  # Assuming 1 as index spacing; modify as necessary for actual data spacing
-    #         derivative[:, 2:-2] = (-smoothed[:, 0:-4] + 8 * smoothed[:, 1:-3] - 8 * smoothed[:, 3:-1] + smoothed[:, 4:]) / (12 * h)
-
         return derivative
 
     def vorticity(self, level = 'sf'):
@@ -351,7 +162,7 @@ class Met:
             v = self.surface[self.surface_dict['V10'], self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
 
         else:
-            pres = pres_list.index(level)  # assuming pres_list is defined with pressure levels
+            pres = self.pres_list.index(level)  # assuming pres_list is defined with pressure levels
             u = self.upper[self.upper_dict['u'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
             v = self.upper[self.upper_dict['v'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
         
@@ -378,7 +189,7 @@ class Met:
             v = self.surface[self.surface_dict['V10'], self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
 
         else:
-            pres = pres_list.index(level)  # assuming pres_list is defined with pressure levels
+            pres = self.pres_list.index(level)  # assuming pres_list is defined with pressure levels
             u = self.upper[self.upper_dict['u'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
             v = self.upper[self.upper_dict['v'], pres, self.lat_start:self.lat_end + 1, self.lon_start:self.lon_end + 1]
         
@@ -623,130 +434,6 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
 
 
 
-#수증기 색상 함수
-def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
-    cmap = plt.get_cmap(cmap)
-    new_cmap = LinearSegmentedColormap.from_list(
-        'truncated_' + cmap.name, cmap(np.linspace(minval, maxval, n)))
-    return new_cmap
-
-truncated_BrBG = truncate_colormap("BrBG", minval=0.35, maxval=1.0) #수증기 colormap 지정
-
-# 새 컬러맵 생성: 확률이 0인 곳은 투명, 그 이상은 불투명
-jet = matplotlib.colormaps['jet']   
-newcolors = jet(np.linspace(0.3, 1, 256))
-newcolors[:2, -1] = 0  # 첫 번째 색상을 완전 투명하게 설정
-jet0 = LinearSegmentedColormap.from_list('TransparentJet', newcolors)
-
-
-#점이 아닌 선의 색상으로 강도를 나타내는 함수
-def colorline(ax, x, y, z=None, cmap=plt.get_cmap('jet_r'),
-              norm=mcolors.Normalize(vmin=950, vmax=1020), linewidth=2, alpha=1.0, zorder=5, label=None, transform=ccrs.PlateCarree()):
-    if z is None:
-        z = np.linspace(0.0, 1.0, len(x))
-    z = np.asarray(z)
-    points = np.array([x, y]).T.reshape(-1, 1, 2)
-    segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    
-    lc = mcoll.LineCollection(
-        segments, array=z, cmap=cmap, norm=norm,
-        linewidth=linewidth, alpha=alpha, zorder=zorder, label=label,
-        transform=ccrs.PlateCarree()   # ← 이게 중요!
-    )
-    ax.add_collection(lc)
-    return lc
-
-#ax 배경 지정
-def setup_map(ax, back_color = 'y'):
-    
-    gl = ax.gridlines(crs=proj, draw_labels=True, linewidth=1, color='gray', alpha=0.5, linestyle='-')
-    gl.top_labels = False
-    gl.right_labels = False
-    gl.xlabel_style = {'size': 12}
-    gl.ylabel_style = {'size': 12}
-    ax.coastlines()
-    if back_color == 'y':
-        ocean_color = mcolors.to_rgba((147/255, 206/255, 229/255))
-        land_color = mcolors.to_rgba((191/255, 153/255, 107/255))
-        ax.add_feature(cfeature.OCEAN, color=ocean_color)
-        ax.add_feature(cfeature.LAND, color=land_color, edgecolor='none')
-
-def set_map(row = 1, col = 1, size = (10,8) ,back_color = 'n', proj  = ccrs.PlateCarree(0), extent = None):
-    fig, axs = plt.subplots(row, col, figsize = size, subplot_kw={'projection': proj})
-
-    if row == 1 and col == 1:
-        gl = axs.gridlines(crs=ccrs.PlateCarree(0), draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.xlabel_style = {'size': 12}
-        gl.ylabel_style = {'size': 12}
-        gl.xlocator = mticker.FixedLocator(np.arange(-180, 181, 10))
-        gl.ylocator = mticker.FixedLocator(np.arange(-90, 91, 10)) 
-        
-        if extent != None:
-            axs.set_extent(extent)
-            
-        axs.coastlines()
-        if back_color == 'y':
-            ocean_color = mcolors.to_rgba((147/255, 206/255, 229/255))
-            land_color = mcolors.to_rgba((191/255, 153/255, 107/255))
-            axs.add_feature(cfeature.OCEAN, color=ocean_color)
-            axs.add_feature(cfeature.LAND, color=land_color, edgecolor='none')
-    
-    else:
-        for ax in axs:
-            gl = ax.gridlines(crs=ccrs.PlateCarree(0), draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
-            gl.top_labels = False
-            gl.right_labels = False
-            gl.xlabel_style = {'size': 12}
-            gl.ylabel_style = {'size': 12}
-            gl.xlocator = mticker.FixedLocator(np.arange(-180, 181, 10))
-            gl.ylocator = mticker.FixedLocator(np.arange(-90, 91, 10)) 
-            
-            if extent != None:
-                ax.set_extent(extent)
-                
-            ax.coastlines()
-            if back_color == 'y':
-                ocean_color = mcolors.to_rgba((147/255, 206/255, 229/255))
-                land_color = mcolors.to_rgba((191/255, 153/255, 107/255))
-                ax.add_feature(cfeature.OCEAN, color=ocean_color)
-                ax.add_feature(cfeature.LAND, color=land_color, edgecolor='none')
-    
-    return fig, axs
-
-#contour 함수
-def weather_map_contour(ax, lon_grid, lat_grid, data, hpa = 1000):
-    
-    if hpa == 1000:
-        levels = np.arange(920, 1040, 4)
-        bold_levels = np.arange(904,1033,16)
-        levels = levels[~np.isin(levels, bold_levels)]
-        filtered_data = ndimage.gaussian_filter(data, sigma=3, order=0)
-        cs = ax.contour(lon_grid, lat_grid, filtered_data / 100, levels=levels, colors='black', transform=proj)
-        ax.clabel(cs, cs.levels,inline=True, fontsize=10)
-        cs_bold = ax.contour(lon_grid, lat_grid, filtered_data / 100, levels=bold_levels, colors='black', transform=proj, linewidths=3)
-        ax.clabel(cs_bold, cs_bold.levels, inline=True, fontsize=10)
-    
-    elif hpa == 500:
-        levels = np.arange(5220,6001,60)
-        cs = ax.contour(lon_grid, lat_grid, data, levels=levels, colors='black', transform=proj)
-        ax.clabel(cs, cs.levels,inline=True, fontsize=10)        
-            
-
-def contourf_and_save(ax, fig, lon_grid, lat_grid, data, min_position, 
-                      title='', label='', levels=None, cmap='jet', save_path=''):
-    
-    contourf = ax.contourf(lon_grid, lat_grid, data, cmap=cmap, levels=levels, extend='both')
-    cbar_ax = fig.add_axes([0.9, 0.15, 0.03, 0.7])
-    cbar = fig.colorbar(contourf, cax=cbar_ax, orientation='vertical')
-    cbar.set_label(label, fontsize=16)
-    ax.set_title(title, fontsize=20, loc = 'right')
-    if min_position:
-        ax.set_title(title+f' ({min_position[list(min_position.keys())[-1]]["mslp"]:.0f}hPa)', fontsize=20, loc = 'right')
-    plt.savefig(save_path, bbox_inches='tight')
-    cbar.remove()
-    contourf.remove()  # 이 방법으로 contourf 객체를 제거
 
 @jit(nopython=True)
 def ep_t(T, P, r):
@@ -762,14 +449,10 @@ def ep_t(T, P, r):
     return theta_e
 
 
-
-
 @jit(nopython=True)
 def concentric_circles(lat, lon, distances, bearings):
     lat_c = np.empty((len(distances), len(bearings)), dtype=np.float32)
     lon_c = np.empty((len(distances), len(bearings)), dtype=np.float32)
-    # w_t = np.empty((13, len(distances), len(bearings)), dtype=np.float32)
-    # w_r = np.empty((13, len(distances), len(bearings)), dtype=np.float32)
     for i, distance in enumerate(distances):
         for j, bearing in enumerate(bearings):
             lat2, lon2 = calculate_bearing_position(lat, lon, distance, bearing)

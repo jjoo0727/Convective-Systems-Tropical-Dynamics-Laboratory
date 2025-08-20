@@ -32,6 +32,7 @@ from scipy.interpolate import interpn
 from scipy.ndimage import binary_dilation, minimum_filter, maximum_filter, label
 from scipy import integrate
 from scipy.ndimage import gaussian_filter1d
+from sklearn.neighbors import BallTree
 
 from datetime import datetime, timedelta
 
@@ -420,16 +421,31 @@ def calculate_bearing_position(lat, lon, bearing, distance):
     return new_lat, new_lon     
 
 
+def _ensure_Nx2(a, dtype=int):
+    a = np.asarray(a)
+    if a.size == 0:
+        return np.empty((0, 2), dtype=dtype)
+    if a.ndim == 1:
+        # single point or malformed empty -> coerce
+        if a.shape[0] == 2:
+            return a.reshape(1, 2).astype(dtype)
+        else:
+            # best-effort: cannot infer pairs -> empty
+            return np.empty((0, 2), dtype=dtype)
+    return a.astype(dtype)
+
 #태풍 발생 위치 주변 & 10m/s 이상 지역 주변
 def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lon_grid, 
-                   wind_speed, pred_time, z_diff, storm_lon, storm_lat, storm_mslp, storm_time, 
-                   min_position, mask_size=2.5, init_size=2.5, local_min_size = 5, mslp_z_dis = 250 ,wind_thres=8, wind_field = 4 ,mslp_2hpa = 'n',back_prop = 'n'):
+                   wind_speed, pred_time, z_diff, storm_lon, storm_lat, storm_mslp, storm_time, key_time,
+                   min_position, mask_size=2.5, init_size=2.5, local_min_size = 5, mslp_z_dis = 250 ,wind_thres=8, wind_field = 250 
+                   ,mslp_2hpa = 'n',back_prop = 'n'):
     
-    tc_score = 0
+    # tc_score = 0
     init_str = storm_time[0]
     mask_size = int(mask_size*4)
     local_min_size = int(local_min_size*4)+1
     
+    # 이미 min_position이 존재할 때 last_time_step (last_key)를 지정하고 type이 ex면 추적 끝내기
     if len(min_position)>0:
         mp_time = list(min_position.keys())
         mp_time.sort()
@@ -442,7 +458,9 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
             if pred_time >= last_key:
                 return min_position
     
-
+        if min_position[last_key]['type'] == 'ex':
+            return min_position
+        
     # 해면기압의 로컬 최소값의 위치 찾기
     data_copy = np.copy(data)   #data_copy는 MSLP 정보
     filtered_data = minimum_filter(data_copy, size = local_min_size)
@@ -480,26 +498,57 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
             if distance <= mslp_z_dis:
                 fm_positions.append(min_pos_int)
             # 조건 2: mslp(해면기압)이 990hPa 이하이면 거리와 상관 없이 추가
-            elif data_copy[min_pos_int[0], min_pos_int[1]] <= 990:
-                fm_positions.append(min_pos_int)
+            # elif data_copy[min_pos_int[0], min_pos_int[1]] <= 990:
+            #     fm_positions.append(min_pos_int)
     
-    minima_positions = np.unique(fm_positions, axis=0)  # 중복 제거
+    # After distance pairing (may be empty)
+    minima_positions = np.unique(fm_positions, axis=0) if fm_positions else np.empty((0,2), int)
+    minima_positions = _ensure_Nx2(minima_positions)
     
+    EARTH_RADIUS_KM = 6371.0
+    wind_radius_km = 250  # distance threshold
 
-    # wind_speed > 10인 조건을 만족하는 픽셀에 대한 마스크 생성 후 지우기
-    # if back_prop == 'n':
-    wind_mask = wind_speed >= wind_thres         
-    expanded_wind_mask = binary_dilation(wind_mask, structure=np.ones((wind_field+1,wind_field+1)))  # wind_mask의 주변 2픽셀 확장
-    data_copy[~expanded_wind_mask] = np.nan # 확장된 마스크를 사용하여 wind_speed > 10 조건과 그 주변 2픽셀 이외의 위치를 NaN으로 설정
-        
+    # 1) All wind>=thres points (lat/lon)
+    wind_mask = wind_speed >= wind_thres
+    if minima_positions.shape[0] < 1 or not np.any(wind_mask):
+        minima_positions = np.empty((0, 2), dtype=int)
+    else:
+        wind_lat = lat_grid[wind_mask]
+        wind_lon = lon_grid[wind_mask]
+        wind_pts_rad = np.deg2rad(np.c_[wind_lat, wind_lon])
+
+        # 2) Build BallTree with haversine metric
+        tree = BallTree(wind_pts_rad, metric="haversine")
+
+        # 3) Query nearest wind point for each MSLP minimum
+        mins_lat = lat_grid[minima_positions[:, 0], minima_positions[:, 1]]
+        mins_lon = lon_grid[minima_positions[:, 0], minima_positions[:, 1]]
+        mins_pts_rad = np.deg2rad(np.c_[mins_lat, mins_lon])
+
+        # Haversine distance in radians -> km
+        dist_rad, _ = tree.query(mins_pts_rad, k=1)
+        dist_km = dist_rad[:, 0] * EARTH_RADIUS_KM
+
+        keep = dist_km <= wind_radius_km
+        minima_positions = minima_positions[keep]
+
+    mask = np.zeros_like(data_copy, dtype=bool)
+
+    # Mark minima positions as True
+    for pos in minima_positions:
+        mask[pos[0], pos[1]] = True
+
+    # Keep only minima positions, set the rest to NaN
+    data_copy[~mask] = np.nan
+
     
     #처음엔 태풍 발생 위치 주변에서 찾기
     if len(min_position) < 1:
-        if pred_time <= storm_time[0] + timedelta(days=2):
+        if pred_time <= key_time + timedelta(days=2):
             data_copy[(lat_grid > (storm_lat[storm_time == pred_time]+init_size))|(lat_grid < (storm_lat[storm_time == pred_time]-init_size))] = np.nan   
             data_copy[(lon_grid > (storm_lon[storm_time == pred_time]+init_size))|(lon_grid < (storm_lon[storm_time == pred_time]-init_size))] = np.nan 
         else:
-            if pred_time == storm_time[0] + timedelta(days=3):
+            if pred_time > key_time + timedelta(days=2):
                 print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍 발생 X.")
             return min_position
         
@@ -520,8 +569,10 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
     
 
     #data_copy의 모든 값들이 Nan이면 패스
-    if np.isnan(data_copy).all():
-        print(pred_time.strftime("%Y/%m/%d/%HUTC"), "모든 값이 NaN입니다. 유효한 최소값이 없습니다.")
+    if np.isnan(data_copy).all() and len(min_position) > 0:
+        print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍이 소멸하였습니다.")
+        min_position[last_key]['type'] = 'ex'
+        return min_position
 
 
     #data_copy에서 최소값 찾기
@@ -564,44 +615,42 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
                      
         minima_positions = filtered_positions  
         
+        # 태풍이 이전에는 검측되었으나 이번 시간에는 검측이 안 된 경우 ex로 지정
         if (len(minima_positions) < 1) and (len(min_position)>0):  #태풍 소멸 이후
-            if min_position[last_key]['type'] != 'ex':
-                print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍이 소멸하였습니다.")
-                min_position[last_key]['type'] = 'ex'
+            print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍이 소멸하였습니다.")
+            min_position[last_key]['type'] = 'ex'
 
                 
-            
-        elif (len(minima_positions) < 1) and (len(min_position)<1): #태풍 발생을 못 찾음
+        #태풍 발생을 아직 못 찾음
+        elif (len(minima_positions) < 1) and (len(min_position)<1): 
             pass
         
-        
+        # 이전에도 태풍이 존재했고 후보군이 잡힌 경우
         elif (len(minima_positions) > 0) and (len(min_position)>0):
             dis_pos_list=[]
 
-            if min_position[last_key]['type'] != 'ex':
-                for pos in minima_positions:
+            for pos in minima_positions:
 
-                    # print('pos', pos)
-                    min_index = (pos[0], pos[1])
-                    min_lat = lat_indices[lat_start + pos[0]]
-                    min_lon = lon_indices[lon_start + pos[1]]
-                    min_value = data_copy[pos[0],pos[1]]
+                # print('pos', pos)
+                min_index = (pos[0], pos[1])
+                min_lat = lat_indices[lat_start + pos[0]]
+                min_lon = lon_indices[lon_start + pos[1]]
+                min_value = data_copy[pos[0],pos[1]]
 
 
-                    # 여러 minima가 있는 경우 우열을 가림. 이전보다 더 먼 곳에 위치한 minima가 pop됨
-                    dis = haversine_distance(min_lat, min_lon, min_position[last_key]['lat'], min_position[last_key]['lon'])
-                    dis_pos_list.append([min_lat, min_lon, min_index, min_value, dis])
-                    if len(dis_pos_list)>1:
-                        if dis_pos_list[-1][4] > dis_pos_list[-2][4]:
-                            dis_pos_list.pop()
-                
-                min_lat, min_lon, min_index, min_value = dis_pos_list[0][0], dis_pos_list[0][1], dis_pos_list[0][2], dis_pos_list[0][3]
-                min_position[pred_time] = {'lon': min_lon, 'lat': min_lat, 'idx': min_index, 
-                                                                    'mslp':  min_value, 'type':'tc'}
-                if back_prop == 'y':
-                    min_position[pred_time]['type'] = 'td'
-            else:
-                pass
+                # 여러 minima가 있는 경우 우열을 가림. 이전보다 더 먼 곳에 위치한 minima가 pop됨
+                dis = haversine_distance(min_lat, min_lon, min_position[last_key]['lat'], min_position[last_key]['lon'])
+                dis_pos_list.append([min_lat, min_lon, min_index, min_value, dis])
+                if len(dis_pos_list)>1:
+                    if dis_pos_list[-1][4] > dis_pos_list[-2][4]:
+                        dis_pos_list.pop()
+            
+            min_lat, min_lon, min_index, min_value = dis_pos_list[0][0], dis_pos_list[0][1], dis_pos_list[0][2], dis_pos_list[0][3]
+            min_position[pred_time] = {'lon': min_lon, 'lat': min_lat, 'idx': min_index, 
+                                                                'mslp':  min_value, 'type':'tc'}
+            if back_prop == 'y':
+                min_position[pred_time]['type'] = 'td'
+
                 
         elif (len(minima_positions) > 0) and (len(min_position)<1):
             print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍 발생")
