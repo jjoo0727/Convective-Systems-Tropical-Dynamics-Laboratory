@@ -506,7 +506,7 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
     minima_positions = _ensure_Nx2(minima_positions)
     
     EARTH_RADIUS_KM = 6371.0
-    wind_radius_km = 250  # distance threshold
+    wind_radius_km = wind_field # distance threshold
 
     # 1) All wind>=thres points (lat/lon)
     wind_mask = wind_speed >= wind_thres
