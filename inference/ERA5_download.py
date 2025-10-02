@@ -17,9 +17,9 @@ import itertools
 def download_era5_surface(year, month, day, time, area, file_path):
     c = cdsapi.Client(
         # url="https://cds.climate.copernicus.eu/api/v2",
-        url="https://cds.climate.copernicus.eu/api",
+        url="https://cds.climate.coperni                                                                                                                                                                             cus.eu/api",
         # key="65047:f1c3f20d-b7ef-43c6-9a7c-540e8651e7fa")
-        key="e8dc52f8-1ae5-4de1-a701-24218a59943a")
+        key="e8dc52f8-1ae5-4de1-a701-24218a59943a",retry_max=500, timeout=600)
     c.retrieve(
         'reanalysis-era5-single-levels',
         {
@@ -77,12 +77,12 @@ def download_era5_upper(year, month, day, time, area, file_path):
 # month = '{:02d}'.format(parsed_time.month)
 # day = '{:02d}'.format(parsed_time.day)
 # time = '{:02d}:{:02d}'.format(parsed_time.hour, parsed_time.minute)
-year = ['2012']
-month = ['06']
+year = ['2022']
+month = ['08']
 # day = np.arange(1,32,1).astype(str)
-day = ['22']
+day = ['25']
 day = ['0' + i if len(i) < 2 else i for i in day]
-times = ['00','12']
+times = ['12']
 area = [90, 0, -90, 360]
 time_len = len(year)*len(month)*len(day)*len(times)
 
