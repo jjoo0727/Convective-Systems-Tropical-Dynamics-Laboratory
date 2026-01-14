@@ -5,6 +5,15 @@ import netCDF4 as nc
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
+
+# Parse coordinate with unit handling
+def parse_coord(node):
+    v = float(node.text)
+    u = (node.get("units") or "").lower()   # e.g., "deg w", "deg n"
+    if "deg w" in u or "deg s" in u:
+        v = -abs(v)
+    return v
+
 def ensemble_data_maker(filename):
     tree = ET.parse(filename)
     root = tree.getroot()
@@ -20,10 +29,10 @@ def ensemble_data_maker(filename):
 
         for disturbance in data.findall('.//disturbance'):
             disturbance_id = disturbance.get('ID')
-            basin = disturbance.find('basin').text
+            # basin = disturbance.find('basin').text
 
-            if disturbance_id.endswith('00E') or basin != "Northwest Pacific":
-                continue
+            # if disturbance_id.endswith('00E') or basin != "Northwest Pacific":
+            #     continue
 
             if disturbance_id not in ensemble_data[member]:
                 ensemble_data[member][disturbance_id] = {}
@@ -31,8 +40,8 @@ def ensemble_data_maker(filename):
             for fix in disturbance.findall('fix'):
                 valid_time = fix.find('validTime').text
                 valid_time = datetime.strptime(valid_time, "%Y-%m-%dT%H:%M:%SZ")
-                latitude = float(fix.find('latitude').text)
-                longitude = float(fix.find('longitude').text)
+                latitude = parse_coord(fix.find('latitude'))
+                longitude = parse_coord(fix.find('longitude'))
                 pressure = float(fix.find('.//pressure').text)
 
                 if valid_time not in ensemble_data[member][disturbance_id]:
@@ -95,5 +104,5 @@ def process_all_xml_to_netcdf(directory):
         xml_to_netcdf(xml_file, nc_file)
         print(f"Conversion complete for {nc_file}")
 
-directory = '/home1/jek/Pangu-Weather/input_data/TIGGE/ecmf/'
+directory = '/data09/TC/TIGGE/ecmf/'
 process_all_xml_to_netcdf(directory)
