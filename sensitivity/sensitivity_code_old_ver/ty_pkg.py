@@ -543,10 +543,29 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
 
     
     #처음엔 태풍 발생 위치 주변에서 찾기
+    # if len(min_position) < 1:
+    #     if pred_time <= key_time + timedelta(days=2):
+    #         data_copy[(lat_grid > (storm_lat[storm_time == pred_time]+init_size))|(lat_grid < (storm_lat[storm_time == pred_time]-init_size))] = np.nan   
+    #         data_copy[(lon_grid > (storm_lon[storm_time == pred_time]+init_size))|(lon_grid < (storm_lon[storm_time == pred_time]-init_size))] = np.nan 
+    #     else:
+    #         if pred_time > key_time + timedelta(days=2):
+    #             print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍 발생 X.")
+    #         return min_position
+    #처음엔 태풍 발생 위치 주변에서 찾기
     if len(min_position) < 1:
         if pred_time <= key_time + timedelta(days=2):
-            data_copy[(lat_grid > (storm_lat[storm_time == pred_time]+init_size))|(lat_grid < (storm_lat[storm_time == pred_time]-init_size))] = np.nan   
-            data_copy[(lon_grid > (storm_lon[storm_time == pred_time]+init_size))|(lon_grid < (storm_lon[storm_time == pred_time]-init_size))] = np.nan 
+
+            hit = (storm_time == pred_time)
+            if not np.any(hit):
+                # 이 시간엔 기준 태풍 위치가 없음 -> 이번 step은 탐색 불가로 처리
+                # (원하면 print를 여기서 찍어도 됨)
+                return min_position
+
+            s_lat = float(storm_lat[hit][0])
+            s_lon = float(storm_lon[hit][0])
+
+            data_copy[(lat_grid > (s_lat + init_size)) | (lat_grid < (s_lat - init_size))] = np.nan
+            data_copy[(lon_grid > (s_lon + init_size)) | (lon_grid < (s_lon - init_size))] = np.nan
         else:
             if pred_time > key_time + timedelta(days=2):
                 print(pred_time.strftime("%Y/%m/%d/%HUTC"), "태풍 발생 X.")
