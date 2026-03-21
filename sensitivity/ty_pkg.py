@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from math import radians, degrees, sin, cos, asin, acos, sqrt, atan2
 
-from scipy.ndimage import binary_dilation, minimum_filter, maximum_filter, label
+from scipy.ndimage import binary_dilation, minimum_filter, maximum_filter, label, center_of_mass
 
 from datetime import datetime, timedelta
 
@@ -69,23 +69,45 @@ def storm_info(pangu_dir, storm_name, storm_year, datetime_list=None, wind_thres
 @jit(nopython=True)
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
-    Calculate the great circle distance in kilometers between two points 
+    Calculate the great circle distance in kilometers between two points
     on the earth (specified in decimal degrees) using Taylor expansion for sine and cosine calculations
     """
-    # convert decimal degrees to radians 
+    # convert decimal degrees to radians
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
 
     # haversine formula approximation with Taylor expansions
-    dlon = lon2 - lon1 
-    dlat = lat2 - lat1 
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
     sin_dlat2 = (dlat/2) - (dlat**3)/48  # Taylor expansion for sin(dlat/2)
     sin_dlon2 = (dlon/2) - (dlon**3)/48  # Taylor expansion for sin(dlon/2)
     cos_lat1 = 1 - (lat1**2)/2 + (lat1**4)/24  # Taylor expansion for cos(lat1)
     cos_lat2 = 1 - (lat2**2)/2 + (lat2**4)/24  # Taylor expansion for cos(lat2)
     a = sin_dlat2**2 + cos_lat1 * cos_lat2 * sin_dlon2**2
-    c = 2 * np.arcsin(np.sqrt(a)) 
+    c = 2 * np.arcsin(np.sqrt(a))
     r = 6371 # Radius of earth in kilometers. Use 3956 for miles
     return c * r
+
+
+def haversine_matrix(lats1, lons1, lats2, lons2):
+    """
+    Vectorized haversine: compute distance matrix between two sets of points.
+    lats1/lons1: shape (N,), lats2/lons2: shape (M,)
+    Returns distance matrix of shape (N, M) in km using the same Taylor expansion
+    as haversine_distance for numerical consistency.
+    """
+    lats1 = np.radians(lats1)[:, None]   # (N, 1)
+    lons1 = np.radians(lons1)[:, None]   # (N, 1)
+    lats2 = np.radians(lats2)[None, :]   # (1, M)
+    lons2 = np.radians(lons2)[None, :]   # (1, M)
+    dlon = lons2 - lons1
+    dlat = lats2 - lats1
+    sin_dlat2 = (dlat / 2) - (dlat ** 3) / 48
+    sin_dlon2 = (dlon / 2) - (dlon ** 3) / 48
+    cos_lat1 = 1 - (lats1 ** 2) / 2 + (lats1 ** 4) / 24
+    cos_lat2 = 1 - (lats2 ** 2) / 2 + (lats2 ** 4) / 24
+    a = sin_dlat2 ** 2 + cos_lat1 * cos_lat2 * sin_dlon2 ** 2
+    c = 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+    return c * 6371
 
 #output 기상 정보 클래스
 class Met:
@@ -261,42 +283,46 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
     filtered_data = minimum_filter(data_copy, size = local_min_size)
     local_minima = data_copy == filtered_data
     minima_labels, num_features = label(local_minima)
-    minima_positions = np.array([np.mean(np.where(minima_labels == i), axis=1) for i in range(1, num_features+1)])
+    # center_of_mass: 단일 패스 O(N_pixels) vs 루프 O(N_labels × N_pixels)
+    minima_positions = np.array(center_of_mass(local_minima, minima_labels, range(1, num_features+1))) if num_features > 0 else np.array([])
 
     #200-500hPa 층후값 로컬 최대값 위치 찾기
     z_minima = z_diff == maximum_filter(z_diff, size = local_min_size)
     z_labels, z_num_features = label(z_minima)
-    z_positions = np.array([np.mean(np.where(z_labels == i), axis=1) for i in range(1, z_num_features+1)])
-    
-    
-    
+    z_positions = np.array(center_of_mass(z_minima, z_labels, range(1, z_num_features+1))) if z_num_features > 0 else np.array([])
+
+
+
     #태풍 발생 시점 이전엔 찾기 X
     if back_prop == 'n':
         if pred_time < init_str:
             return min_position
-    
-    fm_positions = []
 
     # 각 z_position에 대해 모든 minima_positions까지의 거리를 계산 후 일정 거리 이내의 minima_position만 취득
-    for z_pos in z_positions:
-        for min_pos in minima_positions:
-            z_pos_int = [int(z_pos[0]), int(z_pos[1])]
-            min_pos_int = [int(min_pos[0]), int(min_pos[1])]
+    # 벡터화: 이중 루프 대신 haversine_matrix로 한 번에 거리 행렬 계산
+    if len(z_positions) == 0 or len(minima_positions) == 0:
+        fm_positions = []
+    else:
+        z_pos_ints = z_positions.astype(int)
+        min_pos_ints = minima_positions.astype(int)
 
-            # 거리 계산
-            distance = haversine_distance(
-                lat_grid[z_pos_int[0], z_pos_int[1]], lon_grid[z_pos_int[0], z_pos_int[1]],
-                lat_grid[min_pos_int[0], min_pos_int[1]], lon_grid[min_pos_int[0], min_pos_int[1]]
-            )
+        z_lats = lat_grid[z_pos_ints[:, 0], z_pos_ints[:, 1]]
+        z_lons = lon_grid[z_pos_ints[:, 0], z_pos_ints[:, 1]]
+        m_lats = lat_grid[min_pos_ints[:, 0], min_pos_ints[:, 1]]
+        m_lons = lon_grid[min_pos_ints[:, 0], min_pos_ints[:, 1]]
 
-            # 조건 1: 거리가 mslp_z_dis 이내
-            if distance <= mslp_z_dis:
-                fm_positions.append(min_pos_int)
-            # 조건 2: mslp(해면기압)이 990hPa 이하이면 거리와 상관 없이 추가
-            elif data_copy[min_pos_int[0], min_pos_int[1]] <= 990:
-                fm_positions.append(min_pos_int)
-    
-    minima_positions = np.unique(fm_positions, axis=0)  # 중복 제거
+        # dist_matrix shape: (N_z, N_m) — 한 번의 브로드캐스팅으로 전체 거리 계산
+        dist_matrix = haversine_matrix(z_lats, z_lons, m_lats, m_lons)
+
+        # 조건 1: 임의의 z_position에서 mslp_z_dis 이내
+        within_dist = np.any(dist_matrix <= mslp_z_dis, axis=0)  # (N_m,)
+        # 조건 2: mslp(해면기압)이 990hPa 이하이면 거리와 상관 없이 추가
+        low_pressure = data_copy[min_pos_ints[:, 0], min_pos_ints[:, 1]] <= 990
+
+        valid_mask = within_dist | low_pressure
+        fm_positions = min_pos_ints[valid_mask].tolist()
+
+    minima_positions = np.unique(fm_positions, axis=0) if len(fm_positions) > 0 else np.array([])  # 중복 제거
     
 
     # wind_speed > 10인 조건을 만족하는 픽셀에 대한 마스크 생성 후 지우기
@@ -324,9 +350,10 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
         row_end = min(data_copy.shape[0], last_min_idx[0] + mask_size + 1)  # +1은 Python의 슬라이싱이 상한을 포함하지 않기 때문
         col_start = max(0, last_min_idx[1] - mask_size)
         col_end = min(data_copy.shape[1], last_min_idx[1] + mask_size + 1)
-        data_nan_filled = np.full(data_copy.shape, np.nan)
-        data_nan_filled[row_start:row_end, col_start:col_end] = data_copy[row_start:row_end, col_start:col_end]
-        data_copy = data_nan_filled
+        # 전체 배열 복사 대신 창 밖만 NaN으로 설정
+        window = data_copy[row_start:row_end, col_start:col_end].copy()
+        data_copy[:] = np.nan
+        data_copy[row_start:row_end, col_start:col_end] = window
         # plt.imshow(data_copy)
         # plt.show()
 
@@ -339,12 +366,15 @@ def tc_finder(data, lat_indices, lon_indices, lat_start, lon_start, lat_grid, lo
 
     #data_copy에서 최소값 찾기
     else:
-        #data_copy에서 nan이 아닌 부분에서만 minima_position 살리기
-        filtered_positions = []
-        for pos in minima_positions:
-            lat, lon = int(pos[1]), int(pos[0])
-            if not np.isnan(data_copy[lon, lat]):
-                filtered_positions.append((int(lon), int(lat)))
+        #data_copy에서 nan이 아닌 부분에서만 minima_position 살리기 (벡터화)
+        if len(minima_positions) > 0:
+            pos_arr = minima_positions.astype(int)
+            rows = pos_arr[:, 0]   # 원본의 lon 변수 (행 인덱스)
+            cols = pos_arr[:, 1]   # 원본의 lat 변수 (열 인덱스)
+            valid = ~np.isnan(data_copy[rows, cols])   # data_copy[row, col]
+            filtered_positions = list(zip(rows[valid].tolist(), cols[valid].tolist()))  # (row, col)
+        else:
+            filtered_positions = []
 
 
         

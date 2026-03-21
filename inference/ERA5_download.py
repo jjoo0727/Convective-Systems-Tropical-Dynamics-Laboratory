@@ -77,12 +77,12 @@ def download_era5_upper(year, month, day, time, area, file_path):
 # month = '{:02d}'.format(parsed_time.month)
 # day = '{:02d}'.format(parsed_time.day)
 # time = '{:02d}:{:02d}'.format(parsed_time.hour, parsed_time.minute)
-year = ['2022']
+year = ['2016']
 month = ['08']
 # day = np.arange(1,32,1).astype(str)
-day = ['25']
+day = ['27']
 day = ['0' + i if len(i) < 2 else i for i in day]
-times = ['12']
+times = ['00']
 area = [90, 0, -90, 360]
 time_len = len(year)*len(month)*len(day)*len(times)
 
